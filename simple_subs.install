@@ -1,0 +1,61 @@
+<?php
+
+/**
+ * @file Installation file for Simple Subscriptions functionality
+ */
+
+/**
+ * Implementation of hook_install
+ */
+function simple_subs_install() {
+  drupal_install_schema('simple_subs');
+  variable_set('simple_subs_email_update_bool', FALSE);
+  variable_set('simple_subs_target_nids', array());
+}
+
+/**
+ * Implementation of hook_schema
+ */
+function simple_subs_schema() {
+  $schema['simple_subscriptions'] = array(
+    'description' => 'Base table for handling simple node comment subscriptions',
+    'fields' => array(
+      'sid' => array(
+        'description' => 'Unique subscription ID for this user and this node',
+        'type' => 'serial',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'uid' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => "User's {users}.uid.",
+      ),
+      'nid' => array(
+        'description' => 'The {node}.nid this record affects.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+    ),
+    'indexes' => array(
+      'uid' => array('uid'),
+      'nid' => array('nid'),
+    ),
+    'primary key' => array('sid'),
+  );
+
+  return $schema;
+}
+
+/**
+ * Implementation of hook_uninstall
+ */
+function simple_subs_uninstall() {
+  drupal_uninstall_schema('simple_subs');
+  variable_del('simple_subs_email_update_bool');
+  variable_del('simple_subs_target_nids');
+}

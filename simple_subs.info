@@ -1,0 +1,6 @@
+; $Id
+name = Simple Subscriptions
+description = Subscription functionality for subscribing to node comments
+core = 6.x
+
+package = Custom

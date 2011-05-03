@@ -1,0 +1,296 @@
+<?php
+
+/**
+ * @file Simple Subscriptions functionality
+ */
+
+/**
+ * Implementation of hook_menu().
+ */
+function simple_subs_menu() {
+  $items = array();
+
+  $items['custom/subscribe/%'] = array(
+    'title' => 'Subscribe to a Discussion',
+    'description' => 'Custom callback to subscribe currently logged-in user to a discussion',
+    'access callback' => 'user_access',
+    'access arguments' => array('subscribe to discussions'),
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('simple_subs_subscribe', 2),
+    'type' => MENU_CALLBACK,
+  );
+
+  $items['custom/unsubscribe/%'] = array(
+    'title' => 'Unsubscribe from a Discussion',
+    'description' => 'Custom callback to unsubscribe currently logged-in user from a discussion',
+    'access callback' => 'user_access',
+    'access arguments' => array('subscribe to discussions'),
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('simple_subs_unsubscribe', 2),
+    'type' => MENU_CALLBACK,
+  );
+
+  return $items;
+}
+
+/**
+ * Implementation of hook_perms().
+ */
+function simple_subs_perm() {
+  return array(
+    'administer simple subscriptions (unused)',
+    'subscribe to discussions',
+  );
+}
+
+/**
+ * Implementation of hook_form_alter().
+ */
+function simple_subs_form_alter(&$form, &$form_state, $form_id) {
+  switch ($form_id) {
+    case 'comment_node_form':
+      _simple_subs_nodecomment_form_alteration($form, $form_state);
+      break;
+  }
+}
+
+/**
+ * Actual form alteration code for comments here
+ */
+function _simple_subs_nodecomment_form_alteration(&$form, &$form_state) {
+  global $user;
+  $current_nid = arg(1);
+  $user_has_subscription = simple_subs_user_has_subscription($user->uid, $current_nid);
+  $default_value = ($user_has_subscription) ? TRUE : FALSE;
+
+  if (!$user_has_subscription) {
+    $form['simple_subscription'] = array(
+      '#type' => 'checkbox',
+      '#title' => 'Subscribe to this discussion to receive email updates',
+      '#default_value' => FALSE,
+    );
+    $form['#submit'][] = 'simple_subs_nodecomment_submit';
+  }
+}
+
+/**
+ * Verify whether or not user has subscription for a given node
+ */
+function simple_subs_user_has_subscription($uid, $nid) {
+  return db_result(db_query("SELECT sid FROM {simple_subscriptions} WHERE uid = %d AND nid = %d", array($uid, $nid)));
+}
+
+/**
+ * Custom submit function for node comments
+ */
+function simple_subs_nodecomment_submit($form, &$form_state) {
+  // add code to save/update records for our table here if checkbox checked
+  if ($form_state['values']['simple_subscription'] == 1) {
+    global $user;
+    $this_subscription = array(
+      'uid' => $user->uid,
+      'nid' => $form_state['values']['comment_target_nid'],
+    );
+    $record = drupal_write_record('simple_subscriptions', $this_subscription);
+    if ($record == SAVED_NEW) {
+      // send email notifying user of subscription
+      $account = user_load($this_subscription['uid']);
+      $target_node = new stdClass;
+      $target_node->nid = $this_subscription['nid'];
+      $target_node->title = _simple_subs_node_title($this_subscription['nid']);
+      simple_subs_notify_of_subscription($account, $target_node);
+    }
+  }
+}
+
+/**
+ * Implementation of hook_nodeapi().
+ */
+function simple_subs_nodeapi(&$node, $op, $a3 = NULL, $a4 = NULL) {
+  switch ($op) {
+    case 'update':
+      switch ($node->type) {
+        case 'comment':
+          if ($node->status) {
+            _simple_subs_prep_subscription_update($node->comment_target_nid);
+          }
+      }
+  }
+}
+
+/**
+ * Set environment to be ready to send email notifications next cron run
+ */
+function _simple_subs_prep_subscription_update($nid) {
+  // set variable for email notifications to true and add nid to target nid's
+  variable_set('simple_subs_email_update_bool', TRUE);
+
+  $target_nids = variable_get('simple_subs_target_nids', array());
+  $target_nids[] = $nid;
+  variable_set('simple_subs_target_nids', $target_nids);
+}
+
+/**
+ * Implementation of hook_cron().
+ */
+function simple_subs_cron() {
+  $need_to_email = variable_get('simple_subs_email_update_bool', FALSE);
+  if ($need_to_email) {
+    $nids_with_updates = variable_get('simple_subs_target_nids', array());
+    if (count($nids_with_updates) > 0) {
+      // pull node titles for later use in email
+      $target_nodes = array();
+      foreach ($nids_with_updates as $nid) {
+        $target_nodes[$nid] = new stdClass;
+        $target_nodes[$nid]->nid = $nid;
+        $target_nodes[$nid]->title = _simple_subs_node_title($nid);
+      }
+      // email those uid's with subscriptions to this node
+      foreach ($target_nodes as $target_node) {
+        $subscriber_uids_query = db_query("SELECT uid FROM {simple_subscriptions} WHERE nid = %d", $target_node->nid);
+        while ($subscriber_uid = db_result($subscriber_uids_query)) {
+          // send emails
+          $subscriber = user_load($subscriber_uid);
+          simple_subs_notify_of_update($subscriber, $target_node);
+        }
+      }
+    }
+
+    variable_set('simple_subs_email_update_bool', FALSE);
+    variable_set('simple_subs_target_nids', array());
+  }
+}
+
+/**
+ * Call to drupal_mail, notification of initial subscription to a discussion
+ *
+ * See the first function of the example on this page: http://api.drupal.org/api/drupal/includes--mail.inc/function/drupal_mail/6
+ */
+function simple_subs_notify_of_subscription ($account, $node) {
+  $params['account'] = $account;
+  $params['discussion_nid'] = $node->nid;
+  $params['discussion_title'] = $node->title;
+  $params['discussion_path'] = drupal_get_path_alias('node/' . $node->nid);
+  drupal_mail('simple_subs', 'initial_subscription', $account->mail, user_preferred_language($account), $params);
+}
+
+/**
+ * Call to drupal_mail, notification of an update to a discussion to which a user is already subscribed
+ */
+function simple_subs_notify_of_update ($account, $node) {
+  $params['account'] = $account;
+  $params['discussion_nid'] = $node->nid;
+  $params['discussion_title'] = $node->title;
+  $params['discussion_path'] = drupal_get_path_alias('node/' . $node->nid);
+  drupal_mail('simple_subs', 'subscription_update', $account->mail, user_preferred_language($account), $params);
+}
+
+/**
+ * Implementation of hook_mail().
+ */
+function simple_subs_mail($key, &$message, $params) {
+  global $base_url;
+  $language = $message['language'];
+  $variables = user_mail_tokens($params['account'], $language);
+  $variables['!discussion_nid'] = $params['discussion_nid'];
+  $variables['!discussion_title'] = $params['discussion_title'];
+  $variables['!discussion_path'] = $params['discussion_path'];
+  $variables['!base_path'] = $base_url;
+
+  switch ($key) {
+    case 'initial_subscription':
+      // compose email for initial subscription to $params['target_nid']
+      $message['subject'] = t("Notification: You've subscribed to a discussion");
+      $message['body'][] = t("Dear !username,\n\nThank you for registering to receive notifications for the discussion, !discussion_title. Please click on the following link or paste it into your web browser to visit the discussion: \n\n!base_path/!discussion_path \n\n\nSincerely,\n\nThe Website Team\n\nIn order to unsubscribe from this discussion, please click the following link or paste it into your web browser: !base_path/custom/unsubscribe/!discussion_nid", $variables, $language->language);
+      break;
+
+    case 'subscription_update':
+      // compose email for update to a subscribed-to node $params['target_nid']
+      $message['subject'] = t('Notification: Your discussion has been updated');
+      $message['body'][] = t("Dear !username,\n\nThe following discussion, !discussion_title, has been updated. Please click on the following link or paste it into your web browser: \n\n!base_path/!discussion_path \n\n\nSincerely, The Website Team\n\n\n\nIn order to unsubscribe from this discussion, please click the following link or paste it into your web browser: !base_path/custom/unsubscribe/!discussion_nid", $variables, $language->language);
+      break;
+  }
+}
+
+/**
+ * Confirm subscribe request (when done via link instead of comment form)
+ */
+function simple_subs_subscribe(&$form_state, $nid) {
+  // "are you sure" form
+  $form['nid'] = array(
+    '#type' => 'hidden',
+    '#value' => $nid,
+  );
+  $node_title = _simple_subs_node_title($nid);
+  $node_path = 'node/' . $nid;
+
+  return confirm_form($form,
+    t("Are you sure you want to subscribe to the discussion %title?", array('%title' => check_plain($node_title))),
+    $node_path,
+    t('You will receive email updates as new comments are posted to this discussion. To unsubscribe, visit the discussion page or subscription emails.'),
+    t('Yes, subscribe'),
+    t('Cancel, do not subscribe'));
+}
+
+/**
+ * Submit handler for subscribe confirmation page
+ */
+function simple_subs_subscribe_submit($form, &$form_state) {
+  if ($form_state['values']['confirm']) {
+    global $user;
+    $this_subscription = array(
+      'uid' => $user->uid,
+      'nid' => $form_state['values']['nid'],
+    );
+    $record = drupal_write_record('simple_subscriptions', $this_subscription);
+    if ($record == SAVED_NEW) {
+      // send email notifying user of subscription
+      $account = user_load($this_subscription['uid']);
+      $target_node = new stdClass;
+      $target_node->nid = $this_subscription['nid'];
+      $target_node->title = _simple_subs_node_title($this_subscription['nid']);
+      simple_subs_notify_of_subscription($account, $target_node);
+    }
+  }
+
+  $form_state['redirect'] = drupal_get_path_alias('node/' . $form_state['values']['nid']);
+}
+
+/**
+ * Confirm unsubscribe request
+ */
+function simple_subs_unsubscribe(&$form_state, $nid) {
+  // are you sure form
+  $form['nid'] = array(
+    '#type' => 'hidden',
+    '#value' => $nid,
+  );
+  $node_title = _simple_subs_node_title($nid);
+  $node_path = 'node/' . $nid;
+
+  return confirm_form($form,
+    t("Are you sure you want to unsubscribe from the discussion %title?", array('%title' => check_plain($node_title))),
+    $node_path,
+    t(''),
+    t('Yes, unsubscribe'),
+    t('Cancel, remain subscribed'));
+}
+
+/**
+ * Unsubscribe a user from a discussion
+ */
+function simple_subs_unsubscribe_submit($form, &$form_state) {
+  // actually delete record
+  if ($form_state['values']['confirm']) {
+    global $user;
+    db_query("DELETE FROM {simple_subscriptions} WHERE uid = %d AND nid = %d", array($user->uid, $form_state['values']['nid']));
+  }
+  $form_state['redirect'] = 'node/' . $form_state['values']['nid'];
+}
+
+/**
+ * Utility function for grabbing a node's most recent title
+ */
+function _simple_subs_node_title($nid) {
+  return db_result(db_query("SELECT title FROM {node} WHERE nid = %d ORDER BY vid DESC", $nid));
+}
