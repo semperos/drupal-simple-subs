@@ -1,4 +1,4 @@
-## Drupal - Simple Subscriptions
+# Drupal - Simple Subscriptions
 
 This module is an extremely simple subscriptions module which allows users to subscribe to a node's comments (specifically, NodeComment comments).
 
